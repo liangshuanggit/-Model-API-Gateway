@@ -1,0 +1,5 @@
+{
+  "deepseek-chat": {
+    "provider": "deepseek-web"
+  }
+}
