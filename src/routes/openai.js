@@ -1,12 +1,13 @@
 import express from "express";
 import { DeepSeekWebClient } from "../providers/deepseek-web.js";
 import { createConversationStore } from "../core/conversation-store-factory.js";
+import { ConversationLock } from "../core/conversation-lock.js";
 import { toOpenAIResponse, writeSSE, writeDone } from "../adapters/openai-format.js";
 
 const router = express.Router();
 const deepseek = new DeepSeekWebClient({ token: process.env.DEEPSEEK_TOKEN });
 const conversations = createConversationStore({ ttlMs: Number(process.env.CONVERSATION_TTL_MS) || 24 * 60 * 60 * 1000, maxSize: Number(process.env.CONVERSATION_MAX_SIZE) || 10000 });
-const locks = new Map();
+const locks = new ConversationLock();
 
 function getConversationId(req, body) { return body.conversation_id || req.get("x-conversation-id") || req.get("x-session-id"); }
 function saveConversation(key, result, previous) {
@@ -15,15 +16,6 @@ function saveConversation(key, result, previous) {
   const parentMessageId = result?.messageId || result?.parent_message_id || result?.message_id || result?.id || previous?.parentMessageId;
   if (sessionId || parentMessageId) conversations.set(key, { sessionId, parentMessageId });
 }
-async function withConversationLock(key, fn) {
-  if (!key) return fn();
-  const previous = locks.get(key) || Promise.resolve();
-  let release;
-  const current = new Promise((resolve) => { release = resolve; });
-  locks.set(key, current);
-  await previous;
-  try { return await fn(); } finally { release(); if (locks.get(key) === current) locks.delete(key); }
-}
 
 router.post("/v1/chat/completions", async (req, res) => {
   const body = req.body || {};
@@ -31,8 +23,8 @@ router.post("/v1/chat/completions", async (req, res) => {
   if (!Array.isArray(messages) || messages.length === 0) return res.status(400).json({ error: { message: "messages must be a non-empty array", type: "invalid_request_error", param: "messages" } });
 
   const key = getConversationId(req, body);
-  return withConversationLock(key, async () => {
-    const previous = key ? conversations.get(key) : undefined;
+  return locks.run(key, async () => {
+    const previous = key ? await conversations.get(key) : undefined;
     const providerOptions = { messages, model, temperature, max_tokens, top_p, stop, sessionId: previous?.sessionId, parentMessageId: previous?.parentMessageId };
     const controller = new AbortController();
     let clientClosed = false;
