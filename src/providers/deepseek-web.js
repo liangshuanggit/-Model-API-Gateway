@@ -3,19 +3,15 @@ import { v4 as uuid } from "uuid";
 
 export class DeepSeekWebClient {
   constructor(options = {}) {
-    this.client = axios.create({
-      baseURL: options.baseURL || "https://chat.deepseek.com",
-      headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" },
-      timeout: options.timeout || 60000
-    });
+    this.client = axios.create({ baseURL: options.baseURL || "https://chat.deepseek.com", headers: { "User-Agent": "Mozilla/5.0", Accept: "application/json" }, timeout: options.timeout || 60000 });
     this.token = options.token;
   }
 
-  buildPayload({ messages = [], model = "deepseek-chat", temperature, max_tokens, top_p, stop }) {
+  buildPayload({ messages = [], model = "deepseek-chat", temperature, max_tokens, top_p, stop, sessionId, parentMessageId }) {
     if (!this.token) throw new Error("DEEPSEEK_TOKEN is not configured");
     const payload = {
-      chat_session_id: uuid(),
-      parent_message_id: uuid(),
+      chat_session_id: sessionId || uuid(),
+      parent_message_id: parentMessageId || uuid(),
       prompt: messages.map((message) => `${message.role}: ${message.content}`).join("\n")
     };
     if (model) payload.model = model;
@@ -27,19 +23,12 @@ export class DeepSeekWebClient {
   }
 
   async chat(options, requestOptions = {}) {
-    const response = await this.client.post("/api/v0/chat/completion", this.buildPayload(options), {
-      headers: { Authorization: `Bearer ${this.token}` },
-      signal: requestOptions.signal
-    });
+    const response = await this.client.post("/api/v0/chat/completion", this.buildPayload(options), { headers: { Authorization: `Bearer ${this.token}` }, signal: requestOptions.signal });
     return response.data;
   }
 
   async *chatStream(options, requestOptions = {}) {
-    const response = await this.client.post("/api/v0/chat/completion", this.buildPayload(options), {
-      responseType: "stream",
-      headers: { Authorization: `Bearer ${this.token}`, Accept: "text/event-stream" },
-      signal: requestOptions.signal
-    });
+    const response = await this.client.post("/api/v0/chat/completion", this.buildPayload(options), { responseType: "stream", headers: { Authorization: `Bearer ${this.token}`, Accept: "text/event-stream" }, signal: requestOptions.signal });
     let buffer = "";
     try {
       for await (const chunk of response.data) {
