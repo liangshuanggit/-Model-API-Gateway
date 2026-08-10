@@ -11,7 +11,7 @@ export class DeepSeekWebClient {
     this.token = options.token;
   }
 
-  buildPayload({ messages = [], model = "deepseek-chat", temperature, max_tokens }) {
+  buildPayload({ messages = [], model = "deepseek-chat", temperature, max_tokens, top_p, stop }) {
     if (!this.token) throw new Error("DEEPSEEK_TOKEN is not configured");
     const payload = {
       chat_session_id: uuid(),
@@ -21,6 +21,8 @@ export class DeepSeekWebClient {
     if (model) payload.model = model;
     if (temperature !== undefined) payload.temperature = temperature;
     if (max_tokens !== undefined) payload.max_tokens = max_tokens;
+    if (top_p !== undefined) payload.top_p = top_p;
+    if (stop !== undefined) payload.stop = stop;
     return payload;
   }
 
@@ -36,7 +38,6 @@ export class DeepSeekWebClient {
       responseType: "stream",
       headers: { Authorization: `Bearer ${this.token}`, Accept: "text/event-stream" }
     });
-
     let buffer = "";
     for await (const chunk of response.data) {
       buffer += chunk.toString("utf8");
@@ -45,11 +46,7 @@ export class DeepSeekWebClient {
       for (const line of parts) {
         const value = line.startsWith("data:") ? line.slice(5).trim() : line.trim();
         if (!value || value === "[DONE]") continue;
-        try {
-          yield JSON.parse(value);
-        } catch {
-          yield { content: value };
-        }
+        try { yield JSON.parse(value); } catch { yield { content: value }; }
       }
     }
     if (buffer.trim()) {
