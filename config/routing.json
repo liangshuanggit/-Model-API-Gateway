@@ -1,0 +1,11 @@
+{
+  "deepseek-chat": {
+    "provider": "deepseek-web",
+    "fallback": [
+      "openai"
+    ]
+  },
+  "gpt-4o-mini": {
+    "provider": "openai"
+  }
+}
