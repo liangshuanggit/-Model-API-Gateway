@@ -32,8 +32,14 @@ function validateRequest(body) {
     const message = body.messages[i];
     if (!message || typeof message !== "object" || Array.isArray(message)) return validationError(`messages[${i}] must be an object`, `messages[${i}]`);
     if (!roles.has(message.role)) return validationError(`messages[${i}].role is invalid`, `messages[${i}].role`);
-    const contentError = validateContent(message.content, i); if (contentError) return contentError;
+    const contentError = message.content === undefined && message.role === "assistant" && Array.isArray(message.tool_calls) ? null : validateContent(message.content, i);
+    if (contentError) return contentError;
     if (message.role === "tool" && typeof message.tool_call_id !== "string") return validationError(`messages[${i}].tool_call_id is required for tool messages`, `messages[${i}].tool_call_id`);
+    if (message.tool_calls !== undefined && !Array.isArray(message.tool_calls)) return validationError(`messages[${i}].tool_calls must be an array`, `messages[${i}].tool_calls`);
+    if (Array.isArray(message.tool_calls)) for (let j = 0; j < message.tool_calls.length; j += 1) {
+      const call = message.tool_calls[j];
+      if (!call || typeof call !== "object" || typeof call.id !== "string" || typeof call.type !== "string" || !call.function || typeof call.function !== "object" || typeof call.function.name !== "string" || typeof call.function.arguments !== "string") return validationError(`messages[${i}].tool_calls[${j}] is invalid`, `messages[${i}].tool_calls[${j}]`);
+    }
   }
   if (body.model !== undefined && typeof body.model !== "string") return validationError("model must be a string", "model");
   for (const name of ["temperature", "top_p"]) if (body[name] !== undefined && (typeof body[name] !== "number" || !Number.isFinite(body[name]))) return validationError(`${name} must be a finite number`, name);
@@ -41,9 +47,11 @@ function validateRequest(body) {
   if (body.stop !== undefined && !(typeof body.stop === "string" || Array.isArray(body.stop))) return validationError("stop must be a string or array", "stop");
   if (body.stream !== undefined && typeof body.stream !== "boolean") return validationError("stream must be a boolean", "stream");
   if (body.stream_options !== undefined && (!body.stream_options || typeof body.stream_options !== "object" || Array.isArray(body.stream_options))) return validationError("stream_options must be an object", "stream_options");
+  if (body.tools !== undefined && !Array.isArray(body.tools)) return validationError("tools must be an array", "tools");
+  if (body.tool_choice !== undefined && !(typeof body.tool_choice === "string" || (body.tool_choice && typeof body.tool_choice === "object"))) return validationError("tool_choice must be a string or object", "tool_choice");
   return null;
 }
-function flattenMessageContent(content) { return typeof content === "string" ? content : content.filter((part) => part.type === "text").map((part) => part.text).join("\n"); }
+function flattenMessageContent(content) { return typeof content === "string" ? content : (content || []).filter((part) => part.type === "text").map((part) => part.text).join("\n"); }
 async function saveConversation(key, result, previous) {
   if (!key) return;
   const sessionId = result?.sessionId || result?.chat_session_id || result?.session_id || result?.conversation_id || previous?.sessionId;
@@ -56,6 +64,7 @@ router.post("/v1/chat/completions", async (req, res) => {
   const invalid = validateRequest(body); if (invalid) return res.status(invalid.status).json(invalid.body);
   const model = body.model || "deepseek-chat";
   if (!openAIModel(model)) return res.status(404).json({ error: { message: `The model '${model}' does not exist`, type: "invalid_request_error", param: "model", code: "model_not_found" } });
+  if (body.tools?.length || body.tool_choice) return res.status(400).json({ error: { message: "Tool calling is not supported by the DeepSeek Web provider", type: "invalid_request_error", param: body.tools?.length ? "tools" : "tool_choice", code: "unsupported_parameter" } });
   const { temperature, max_tokens, top_p, stop, stream = false, stream_options = {} } = body;
   const messages = body.messages.map((message) => ({ ...message, content: flattenMessageContent(message.content) }));
   const key = getConversationId(req, body);
