@@ -1,0 +1,5 @@
+apiVersion: v2
+name: model-api-gateway
+description: OpenAI compatible multi model API gateway
+version: 0.1.0
+appVersion: "1.0.0"
