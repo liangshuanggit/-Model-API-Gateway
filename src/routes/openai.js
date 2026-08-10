@@ -3,6 +3,7 @@ import { DeepSeekWebClient } from "../providers/deepseek-web.js";
 import { createConversationStore } from "../core/conversation-store-factory.js";
 import { createConversationLock } from "../core/conversation-lock-factory.js";
 import { redisClient } from "../core/redis-client.js";
+import { openAIModel } from "../services/model-registry.js";
 import { toOpenAIResponse, writeSSE, writeDone } from "../adapters/openai-format.js";
 
 const router = express.Router();
@@ -11,7 +12,26 @@ const storeOptions = { redis: redisClient, ttlMs: Number(process.env.CONVERSATIO
 const conversations = createConversationStore(storeOptions);
 const locks = createConversationLock({ ...storeOptions, ttlMs: Number(process.env.CONVERSATION_LOCK_TTL_MS) || 120000 });
 
+const roles = new Set(["system", "user", "assistant", "tool", "developer"]);
+const validStringParam = (value) => value === undefined || typeof value === "string";
 function getConversationId(req, body) { return body.conversation_id || req.get("x-conversation-id") || req.get("x-session-id"); }
+function validationError(message, param, code = "invalid_value") { return { status: 400, body: { error: { message, type: "invalid_request_error", param, code } } }; }
+function validateRequest(body) {
+  if (!Array.isArray(body.messages) || body.messages.length === 0) return validationError("messages must be a non-empty array", "messages");
+  for (let i = 0; i < body.messages.length; i += 1) {
+    const message = body.messages[i];
+    if (!message || typeof message !== "object" || Array.isArray(message)) return validationError(`messages[${i}] must be an object`, `messages[${i}]`);
+    if (!roles.has(message.role)) return validationError(`messages[${i}].role is invalid`, `messages[${i}].role`);
+    if (message.content === undefined || (typeof message.content !== "string" && !Array.isArray(message.content))) return validationError(`messages[${i}].content must be a string or content array`, `messages[${i}].content`);
+  }
+  if (body.model !== undefined && typeof body.model !== "string") return validationError("model must be a string", "model");
+  for (const name of ["temperature", "top_p"]) if (body[name] !== undefined && (typeof body[name] !== "number" || !Number.isFinite(body[name]))) return validationError(`${name} must be a finite number`, name);
+  if (body.max_tokens !== undefined && (!Number.isInteger(body.max_tokens) || body.max_tokens <= 0)) return validationError("max_tokens must be a positive integer", "max_tokens");
+  if (body.stop !== undefined && !(typeof body.stop === "string" || Array.isArray(body.stop))) return validationError("stop must be a string or array", "stop");
+  if (body.stream !== undefined && typeof body.stream !== "boolean") return validationError("stream must be a boolean", "stream");
+  if (body.stream_options !== undefined && (!body.stream_options || typeof body.stream_options !== "object")) return validationError("stream_options must be an object", "stream_options");
+  return null;
+}
 async function saveConversation(key, result, previous) {
   if (!key) return;
   const sessionId = result?.sessionId || result?.chat_session_id || result?.session_id || result?.conversation_id || previous?.sessionId;
@@ -21,37 +41,31 @@ async function saveConversation(key, result, previous) {
 
 router.post("/v1/chat/completions", async (req, res) => {
   const body = req.body || {};
-  const { messages, model = "deepseek-chat", temperature, max_tokens, top_p, stop, stream = false, stream_options = {} } = body;
-  if (!Array.isArray(messages) || messages.length === 0) return res.status(400).json({ error: { message: "messages must be a non-empty array", type: "invalid_request_error", param: "messages" } });
-
+  const invalid = validateRequest(body);
+  if (invalid) return res.status(invalid.status).json(invalid.body);
+  const model = body.model || "deepseek-chat";
+  if (!openAIModel(model)) return res.status(404).json({ error: { message: `The model '${model}' does not exist`, type: "invalid_request_error", param: "model", code: "model_not_found" } });
+  const { messages, temperature, max_tokens, top_p, stop, stream = false, stream_options = {} } = body;
   const key = getConversationId(req, body);
   return locks.run(key, async () => {
     const previous = key ? await conversations.get(key) : undefined;
     const providerOptions = { messages, model, temperature, max_tokens, top_p, stop, sessionId: previous?.sessionId, parentMessageId: previous?.parentMessageId };
-    const controller = new AbortController();
-    let clientClosed = false;
-    const onClose = () => { clientClosed = true; controller.abort(); };
-    req.once("close", onClose);
-
+    const controller = new AbortController(); let clientClosed = false;
+    const onClose = () => { clientClosed = true; controller.abort(); }; req.once("close", onClose);
     try {
       if (!stream) {
         const result = await deepseek.chat(providerOptions, { signal: controller.signal });
         if (clientClosed || res.writableEnded) return;
-        await saveConversation(key, result, previous);
-        return res.json(toOpenAIResponse(result, model));
+        await saveConversation(key, result, previous); return res.json(toOpenAIResponse(result, model));
       }
-
       const id = `chatcmpl-${Date.now()}`;
       res.status(200); res.setHeader("Content-Type", "text/event-stream; charset=utf-8"); res.setHeader("Cache-Control", "no-cache, no-transform"); res.setHeader("Connection", "keep-alive");
       if (typeof res.flushHeaders === "function") res.flushHeaders();
       let sentRole = false; let lastChunk;
       for await (const chunk of deepseek.chatStream(providerOptions, { signal: controller.signal })) {
         if (clientClosed || res.writableEnded || res.destroyed) break;
-        lastChunk = chunk;
-        const content = chunk?.content ?? chunk?.answer ?? chunk?.text ?? chunk?.delta?.content ?? "";
-        if (!content) continue;
-        writeSSE(res, { id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: sentRole ? { content } : { role: "assistant", content }, finish_reason: null }] });
-        sentRole = true;
+        lastChunk = chunk; const content = chunk?.content ?? chunk?.answer ?? chunk?.text ?? chunk?.delta?.content ?? ""; if (!content) continue;
+        writeSSE(res, { id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: sentRole ? { content } : { role: "assistant", content }, finish_reason: null }] }); sentRole = true;
       }
       if (clientClosed || res.writableEnded || res.destroyed) return;
       await saveConversation(key, lastChunk, previous);
@@ -61,14 +75,9 @@ router.post("/v1/chat/completions", async (req, res) => {
     } catch (error) {
       if (clientClosed || error?.code === "ERR_CANCELED" || error?.name === "CanceledError" || error?.name === "AbortError") return;
       const status = error.message === "DEEPSEEK_TOKEN is not configured" ? 503 : error.message === "Conversation lock timeout" ? 409 : 502;
-      if (stream) {
-        if (!res.headersSent) { res.status(status); res.setHeader("Content-Type", "text/event-stream; charset=utf-8"); }
-        if (!res.destroyed) { writeSSE(res, { error: { message: error.message, type: "provider_error" } }); writeDone(res); res.end(); }
-        return;
-      }
-      if (!res.headersSent) return res.status(status).json({ error: { message: error.message, type: error.message === "Conversation lock timeout" ? "conversation_lock_error" : "provider_error" } });
+      if (stream) { if (!res.headersSent) { res.status(status); res.setHeader("Content-Type", "text/event-stream; charset=utf-8"); } if (!res.destroyed) { writeSSE(res, { error: { message: error.message, type: status === 409 ? "conversation_lock_error" : "provider_error" } }); writeDone(res); res.end(); } return; }
+      if (!res.headersSent) return res.status(status).json({ error: { message: error.message, type: status === 409 ? "conversation_lock_error" : "provider_error" } });
     } finally { req.off("close", onClose); }
   });
 });
-
 export default router;
