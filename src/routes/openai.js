@@ -7,23 +7,31 @@ const deepseek = new DeepSeekWebClient({ token: process.env.DEEPSEEK_TOKEN });
 
 router.post("/v1/chat/completions", async (req, res) => {
   const body = req.body || {};
-  const { messages, model = "deepseek-chat", temperature, max_tokens, stream = false } = body;
+  const {
+    messages, model = "deepseek-chat", temperature, max_tokens, top_p, stop,
+    stream = false, stream_options = {}
+  } = body;
+
   if (!Array.isArray(messages) || messages.length === 0) {
     return res.status(400).json({ error: { message: "messages must be a non-empty array", type: "invalid_request_error", param: "messages" } });
   }
+
+  const providerOptions = { messages, model, temperature, max_tokens, top_p, stop };
   try {
     if (!stream) {
-      const result = await deepseek.chat({ messages, model, temperature, max_tokens });
+      const result = await deepseek.chat(providerOptions);
       return res.json(toOpenAIResponse(result, model));
     }
+
     const id = `chatcmpl-${Date.now()}`;
     res.status(200);
     res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
     res.setHeader("Cache-Control", "no-cache, no-transform");
     res.setHeader("Connection", "keep-alive");
     if (typeof res.flushHeaders === "function") res.flushHeaders();
+
     let sentRole = false;
-    for await (const chunk of deepseek.chatStream({ messages, model, temperature, max_tokens })) {
+    for await (const chunk of deepseek.chatStream(providerOptions)) {
       const content = chunk?.answer ?? chunk?.content ?? chunk?.text ?? chunk?.delta?.content ?? "";
       if (!content) continue;
       writeSSE(res, {
@@ -32,10 +40,11 @@ router.post("/v1/chat/completions", async (req, res) => {
       });
       sentRole = true;
     }
-    writeSSE(res, {
-      id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model,
-      choices: [{ index: 0, delta: {}, finish_reason: "stop" }]
-    });
+
+    writeSSE(res, { id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [{ index: 0, delta: {}, finish_reason: "stop" }] });
+    if (stream_options?.include_usage) {
+      writeSSE(res, { id, object: "chat.completion.chunk", created: Math.floor(Date.now() / 1000), model, choices: [], usage: { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 } });
+    }
     writeDone(res);
     return res.end();
   } catch (error) {
@@ -52,4 +61,5 @@ router.post("/v1/chat/completions", async (req, res) => {
     return res.status(status).json({ error: { message: error.message, type: "provider_error" } });
   }
 });
+
 export default router;
