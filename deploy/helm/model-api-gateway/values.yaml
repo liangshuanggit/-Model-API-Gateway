@@ -1,0 +1,13 @@
+replicaCount: 2
+
+image:
+  repository: model-api-gateway
+  tag: latest
+  pullPolicy: IfNotPresent
+
+service:
+  type: ClusterIP
+  port: 3000
+
+env:
+  NODE_ENV: production
