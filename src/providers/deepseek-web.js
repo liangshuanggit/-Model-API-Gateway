@@ -1,5 +1,6 @@
 import axios from "axios";
 import { v4 as uuid } from "uuid";
+import { parseDeepSeekChunk, parseDeepSeekResponse } from "./deepseek/response-parser.js";
 
 export class DeepSeekWebClient {
   constructor(options = {}) {
@@ -9,11 +10,7 @@ export class DeepSeekWebClient {
 
   buildPayload({ messages = [], model = "deepseek-chat", temperature, max_tokens, top_p, stop, sessionId, parentMessageId }) {
     if (!this.token) throw new Error("DEEPSEEK_TOKEN is not configured");
-    const payload = {
-      chat_session_id: sessionId || uuid(),
-      parent_message_id: parentMessageId || uuid(),
-      prompt: messages.map((message) => `${message.role}: ${message.content}`).join("\n")
-    };
+    const payload = { chat_session_id: sessionId || uuid(), parent_message_id: parentMessageId || uuid(), prompt: messages.map((message) => `${message.role}: ${message.content}`).join("\n") };
     if (model) payload.model = model;
     if (temperature !== undefined) payload.temperature = temperature;
     if (max_tokens !== undefined) payload.max_tokens = max_tokens;
@@ -24,7 +21,7 @@ export class DeepSeekWebClient {
 
   async chat(options, requestOptions = {}) {
     const response = await this.client.post("/api/v0/chat/completion", this.buildPayload(options), { headers: { Authorization: `Bearer ${this.token}` }, signal: requestOptions.signal });
-    return response.data;
+    return parseDeepSeekResponse(response.data);
   }
 
   async *chatStream(options, requestOptions = {}) {
@@ -38,13 +35,13 @@ export class DeepSeekWebClient {
         for (const line of parts) {
           const value = line.startsWith("data:") ? line.slice(5).trim() : line.trim();
           if (!value || value === "[DONE]") continue;
-          try { yield JSON.parse(value); } catch { yield { content: value }; }
+          try { yield parseDeepSeekChunk(JSON.parse(value)); } catch { yield { content: value }; }
         }
       }
       if (buffer.trim()) {
         const value = buffer.replace(/^data:\s*/, "").trim();
         if (value && value !== "[DONE]") {
-          try { yield JSON.parse(value); } catch { yield { content: value }; }
+          try { yield parseDeepSeekChunk(JSON.parse(value)); } catch { yield { content: value }; }
         }
       }
     } finally {
