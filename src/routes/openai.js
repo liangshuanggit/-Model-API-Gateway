@@ -1,11 +1,11 @@
 import express from "express";
 import { DeepSeekWebClient } from "../providers/deepseek-web.js";
-import { ConversationStore } from "../core/conversation-store.js";
+import { createConversationStore } from "../core/conversation-store-factory.js";
 import { toOpenAIResponse, writeSSE, writeDone } from "../adapters/openai-format.js";
 
 const router = express.Router();
 const deepseek = new DeepSeekWebClient({ token: process.env.DEEPSEEK_TOKEN });
-const conversations = new ConversationStore({ ttlMs: Number(process.env.CONVERSATION_TTL_MS) || 24 * 60 * 60 * 1000 });
+const conversations = createConversationStore({ ttlMs: Number(process.env.CONVERSATION_TTL_MS) || 24 * 60 * 60 * 1000, maxSize: Number(process.env.CONVERSATION_MAX_SIZE) || 10000 });
 const locks = new Map();
 
 function getConversationId(req, body) { return body.conversation_id || req.get("x-conversation-id") || req.get("x-session-id"); }
