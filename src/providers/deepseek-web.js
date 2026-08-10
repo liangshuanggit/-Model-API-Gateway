@@ -26,34 +26,40 @@ export class DeepSeekWebClient {
     return payload;
   }
 
-  async chat(options) {
+  async chat(options, requestOptions = {}) {
     const response = await this.client.post("/api/v0/chat/completion", this.buildPayload(options), {
-      headers: { Authorization: `Bearer ${this.token}` }
+      headers: { Authorization: `Bearer ${this.token}` },
+      signal: requestOptions.signal
     });
     return response.data;
   }
 
-  async *chatStream(options) {
+  async *chatStream(options, requestOptions = {}) {
     const response = await this.client.post("/api/v0/chat/completion", this.buildPayload(options), {
       responseType: "stream",
-      headers: { Authorization: `Bearer ${this.token}`, Accept: "text/event-stream" }
+      headers: { Authorization: `Bearer ${this.token}`, Accept: "text/event-stream" },
+      signal: requestOptions.signal
     });
     let buffer = "";
-    for await (const chunk of response.data) {
-      buffer += chunk.toString("utf8");
-      const parts = buffer.split(/\r?\n/);
-      buffer = parts.pop() || "";
-      for (const line of parts) {
-        const value = line.startsWith("data:") ? line.slice(5).trim() : line.trim();
-        if (!value || value === "[DONE]") continue;
-        try { yield JSON.parse(value); } catch { yield { content: value }; }
+    try {
+      for await (const chunk of response.data) {
+        buffer += chunk.toString("utf8");
+        const parts = buffer.split(/\r?\n/);
+        buffer = parts.pop() || "";
+        for (const line of parts) {
+          const value = line.startsWith("data:") ? line.slice(5).trim() : line.trim();
+          if (!value || value === "[DONE]") continue;
+          try { yield JSON.parse(value); } catch { yield { content: value }; }
+        }
       }
-    }
-    if (buffer.trim()) {
-      const value = buffer.replace(/^data:\s*/, "").trim();
-      if (value && value !== "[DONE]") {
-        try { yield JSON.parse(value); } catch { yield { content: value }; }
+      if (buffer.trim()) {
+        const value = buffer.replace(/^data:\s*/, "").trim();
+        if (value && value !== "[DONE]") {
+          try { yield JSON.parse(value); } catch { yield { content: value }; }
+        }
       }
+    } finally {
+      if (typeof response.data.destroy === "function") response.data.destroy();
     }
   }
 }
