@@ -11,7 +11,7 @@ export class DeepSeekWebClient {
     this.token = options.token;
   }
 
-  async chat({ messages = [], model = "deepseek-chat", temperature, max_tokens }) {
+  buildPayload({ messages = [], model = "deepseek-chat", temperature, max_tokens }) {
     if (!this.token) throw new Error("DEEPSEEK_TOKEN is not configured");
     const payload = {
       chat_session_id: uuid(),
@@ -21,9 +21,42 @@ export class DeepSeekWebClient {
     if (model) payload.model = model;
     if (temperature !== undefined) payload.temperature = temperature;
     if (max_tokens !== undefined) payload.max_tokens = max_tokens;
-    const response = await this.client.post("/api/v0/chat/completion", payload, {
+    return payload;
+  }
+
+  async chat(options) {
+    const response = await this.client.post("/api/v0/chat/completion", this.buildPayload(options), {
       headers: { Authorization: `Bearer ${this.token}` }
     });
     return response.data;
+  }
+
+  async *chatStream(options) {
+    const response = await this.client.post("/api/v0/chat/completion", this.buildPayload(options), {
+      responseType: "stream",
+      headers: { Authorization: `Bearer ${this.token}`, Accept: "text/event-stream" }
+    });
+
+    let buffer = "";
+    for await (const chunk of response.data) {
+      buffer += chunk.toString("utf8");
+      const parts = buffer.split(/\r?\n/);
+      buffer = parts.pop() || "";
+      for (const line of parts) {
+        const value = line.startsWith("data:") ? line.slice(5).trim() : line.trim();
+        if (!value || value === "[DONE]") continue;
+        try {
+          yield JSON.parse(value);
+        } catch {
+          yield { content: value };
+        }
+      }
+    }
+    if (buffer.trim()) {
+      const value = buffer.replace(/^data:\s*/, "").trim();
+      if (value && value !== "[DONE]") {
+        try { yield JSON.parse(value); } catch { yield { content: value }; }
+      }
+    }
   }
 }
